@@ -1,6 +1,7 @@
 pvlib
 pandas
-matplotlib
 numpy
-pytz
+matplotlib
+cvxpy
+scs
 
