@@ -1,8 +1,3 @@
-"""
-solar_pv_simulation.py + Battery Storage Optimization
-Simulates solar PV system (PVLib) + optimizes battery scheduling to minimize grid import cost.
-"""
-
 import pvlib
 import pandas as pd
 import numpy as np
@@ -34,7 +29,6 @@ def get_str(prompt, default=None):
 def main():
     print("Simple Solar PV Simulation (hourly) — PVLib + PVWatts-style approximation\n")
 
-    # --- PV Inputs ---
     lat = get_float("Latitude (deg)", default=22.57)
     lon = get_float("Longitude (deg)", default=88.36)
     tz = get_str("Timezone (tz database string)", default="Asia/Kolkata")
@@ -48,17 +42,14 @@ def main():
     derate = get_float("System derate / performance ratio (0-1)", default=0.82, min_val=0.5, max_val=1.0)
     freq = get_str("Time resolution (H for hourly, 30T for 30-min)", default="H")
 
-    # --- Time index ---
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)
     times = pd.date_range(start=start, end=end, freq=freq, tz=tz)
 
-    # --- Solar position + clearsky ---
     site = pvlib.location.Location(latitude=lat, longitude=lon, tz=tz)
     solpos = site.get_solarposition(times)
     cs = site.get_clearsky(times, model="ineichen")
 
-    # --- Plane-of-array irradiance ---
     poa = pvlib.irradiance.get_total_irradiance(
         surface_tilt=tilt,
         surface_azimuth=azimuth,
@@ -70,12 +61,10 @@ def main():
     )
     poa_global = poa['poa_global'].clip(lower=0)
 
-    # --- DC/AC power estimate ---
     p_dc_kw = system_kw * (poa_global / 1000.0)
     p_ac_kw = p_dc_kw * derate
     p_ac_kw = p_ac_kw.clip(lower=0)
 
-    # --- DataFrame ---
     df = pd.DataFrame({
         "ghi_wm2": cs['ghi'],
         "dni_wm2": cs['dni'],
@@ -89,12 +78,10 @@ def main():
     total_energy_kwh = df["p_ac_kw"].sum() * hours
     print(f"\nPV Simulation complete. Estimated energy: {total_energy_kwh:.2f} kWh")
 
-    # Save PV results
     out_csv = f"pv_results_{start_date}_to_{end_date}.csv"
     df.to_csv(out_csv, index_label="time")
     print(f"Saved PV results: {out_csv}")
 
-    # Plot PV profile
     plt.figure(figsize=(10,4))
     plt.plot(df.index, df["p_ac_kw"])
     plt.ylabel("AC Power (kW)")
@@ -103,14 +90,12 @@ def main():
     plt.savefig("pv_power_profile.png", dpi=200)
     plt.show()
 
-    # --- Synthetic load profile (replace with CSV if available) ---
     hours_of_day = df.index.hour
     load_kw = 1.5 + 0.5 * (np.sin((hours_of_day - 7) / 12 * np.pi) + 1) \
         + 1.5 * (np.exp(-0.5*((hours_of_day-8)/1.5)**2) + np.exp(-0.5*((hours_of_day-19)/1.5)**2))
     load_kw = np.maximum(load_kw, 0.5)
     df['load_kW'] = load_kw
 
-    # --- Battery Optimization ---
     print("\nRunning battery storage optimization...")
     T = len(df)
     pv = df['p_ac_kw'].values
@@ -160,7 +145,6 @@ def main():
     print(f"Optimized cost: ${optimized_cost:.2f}")
     print(f"Cost savings: ${baseline_cost - optimized_cost:.2f}")
 
-    # --- Plots ---
     plt.figure(figsize=(12,8))
     plt.subplot(3,1,1)
     plt.plot(df.index, df['load_kW'], label='Load')
@@ -182,7 +166,6 @@ def main():
     plt.savefig("pv_battery_optimization.png", dpi=150)
     plt.show()
 
-    # Save combined results
     df.to_csv("pv_battery_results.csv")
     print("Saved combined PV + battery results: pv_battery_results.csv")
 
