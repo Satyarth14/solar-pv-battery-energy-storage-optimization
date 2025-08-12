@@ -1,16 +1,14 @@
 """
-solar_pv_simulation.py
-Simple solar PV simulation (hourly) using pvlib clearsky + PVWatts-like approximation.
-
-Outputs:
- - hourly CSV with irradiance and AC power (kW)
- - plots: power vs time, cumulative energy
+solar_pv_simulation.py + Battery Storage Optimization
+Simulates solar PV system (PVLib) + optimizes battery scheduling to minimize grid import cost.
 """
+
 import pvlib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from datetime import datetime
+import cvxpy as cp
 
 def get_float(prompt, default=None, min_val=None, max_val=None):
     while True:
@@ -36,33 +34,31 @@ def get_str(prompt, default=None):
 def main():
     print("Simple Solar PV Simulation (hourly) — PVLib + PVWatts-style approximation\n")
 
-    # --- Inputs ---
-    lat = get_float("Latitude (deg)", default=22.57)               # default: New Delhi ~22.57
-    lon = get_float("Longitude (deg)", default=88.36)             # default: Kolkata ~88.36 (user can change)
+    # --- PV Inputs ---
+    lat = get_float("Latitude (deg)", default=22.57)
+    lon = get_float("Longitude (deg)", default=88.36)
     tz = get_str("Timezone (tz database string)", default="Asia/Kolkata")
     start_date = get_str("Start date (YYYY-MM-DD)", default=datetime.now().strftime("%Y-%m-%d"))
     end_date = get_str("End date (YYYY-MM-DD)", default=start_date)
     system_kw = get_float("System capacity (kW STC)", default=1.0, min_val=0.01)
     tilt = get_float("Tilt angle (deg, 0=flat)", default=None)
     if tilt is None:
-        # rule-of-thumb: tilt ~ latitude
         tilt = round(lat, 1)
     azimuth = get_float("Azimuth (deg, 180 = south in northern hemisphere)", default=180)
     derate = get_float("System derate / performance ratio (0-1)", default=0.82, min_val=0.5, max_val=1.0)
     freq = get_str("Time resolution (H for hourly, 30T for 30-min)", default="H")
 
-    # --- Build time index ---
+    # --- Time index ---
     start = pd.to_datetime(start_date)
-    end = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)  # include full last day
+    end = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)
     times = pd.date_range(start=start, end=end, freq=freq, tz=tz)
 
-    # --- Location and solar position + clearsky ---
+    # --- Solar position + clearsky ---
     site = pvlib.location.Location(latitude=lat, longitude=lon, tz=tz)
     solpos = site.get_solarposition(times)
-    # clearsky model (ineichen is reasonable and doesn't require external data)
-    cs = site.get_clearsky(times, model="ineichen")  # returns ghi, dni, dhi
+    cs = site.get_clearsky(times, model="ineichen")
 
-    # --- Plane-of-array irradiance (fixed tilt) ---
+    # --- Plane-of-array irradiance ---
     poa = pvlib.irradiance.get_total_irradiance(
         surface_tilt=tilt,
         surface_azimuth=azimuth,
@@ -74,14 +70,12 @@ def main():
     )
     poa_global = poa['poa_global'].clip(lower=0)
 
-    # --- Simple DC/AC power estimate (PVWatts-like) ---
-    # P_dc ≈ system_kw * (poa_global / 1000)
+    # --- DC/AC power estimate ---
     p_dc_kw = system_kw * (poa_global / 1000.0)
-    p_ac_kw = p_dc_kw * derate              # simple derate to approximate inverter & system losses
-    # zero-out negative values
+    p_ac_kw = p_dc_kw * derate
     p_ac_kw = p_ac_kw.clip(lower=0)
 
-    # --- Package results ---
+    # --- DataFrame ---
     df = pd.DataFrame({
         "ghi_wm2": cs['ghi'],
         "dni_wm2": cs['dni'],
@@ -91,51 +85,106 @@ def main():
         "p_ac_kw": p_ac_kw
     }, index=times)
 
-    # --- Summary ---
     hours = (df.index[1] - df.index[0]).total_seconds() / 3600.0
     total_energy_kwh = df["p_ac_kw"].sum() * hours
-    print("\nSimulation complete.")
-    print(f"Period: {start_date} to {end_date} ({len(df)} points)")
-    print(f"System capacity: {system_kw} kW  |  Tilt: {tilt}°, Azimuth: {azimuth}°")
-    print(f"Estimated energy: {total_energy_kwh:.2f} kWh")
+    print(f"\nPV Simulation complete. Estimated energy: {total_energy_kwh:.2f} kWh")
 
-    # --- Save CSV ---
+    # Save PV results
     out_csv = f"pv_results_{start_date}_to_{end_date}.csv"
     df.to_csv(out_csv, index_label="time")
-    print(f"Hourly results saved: {out_csv}")
+    print(f"Saved PV results: {out_csv}")
 
-    # --- Plot: Power vs Time ---
+    # Plot PV profile
     plt.figure(figsize=(10,4))
     plt.plot(df.index, df["p_ac_kw"])
     plt.ylabel("AC Power (kW)")
     plt.title(f"PV Power profile ({start_date} to {end_date})")
     plt.tight_layout()
-    fname1 = "pv_power_profile.png"
-    plt.savefig(fname1, dpi=200)
+    plt.savefig("pv_power_profile.png", dpi=200)
     plt.show()
-    print(f"Saved plot: {fname1}")
 
-    # --- Plot: Cumulative energy (kWh) ---
-    cum_energy = df["p_ac_kw"].cumsum() * hours  # kWh cumulative
-    plt.figure(figsize=(10,4))
-    plt.plot(df.index, cum_energy)
-    plt.ylabel("Cumulative energy (kWh)")
-    plt.title("Cumulative energy generated")
+    # --- Synthetic load profile (replace with CSV if available) ---
+    hours_of_day = df.index.hour
+    load_kw = 1.5 + 0.5 * (np.sin((hours_of_day - 7) / 12 * np.pi) + 1) \
+        + 1.5 * (np.exp(-0.5*((hours_of_day-8)/1.5)**2) + np.exp(-0.5*((hours_of_day-19)/1.5)**2))
+    load_kw = np.maximum(load_kw, 0.5)
+    df['load_kW'] = load_kw
+
+    # --- Battery Optimization ---
+    print("\nRunning battery storage optimization...")
+    T = len(df)
+    pv = df['p_ac_kw'].values
+    load = df['load_kW'].values
+    tariff = 0.12 + 0.18 * ((df.index.hour >= 17) & (df.index.hour <= 21)).astype(float)  # $/kWh
+
+    cap_kwh = 8.0
+    p_charge_max = 3.0
+    p_discharge_max = 3.0
+    eta_charge = 0.97
+    eta_discharge = 0.97
+    soc_init = 0.5 * cap_kwh
+    soc_min = 0.05 * cap_kwh
+    soc_max = cap_kwh
+    dt = 1.0
+
+    charge = cp.Variable(T, nonneg=True)
+    discharge = cp.Variable(T, nonneg=True)
+    soc = cp.Variable(T+1)
+    grid_import = cp.Variable(T, nonneg=True)
+
+    constraints = [soc[0] == soc_init]
+    for t in range(T):
+        constraints += [
+            soc[t+1] == soc[t] + (charge[t] * eta_charge - discharge[t] / eta_discharge) * dt,
+            soc[t+1] >= soc_min,
+            soc[t+1] <= soc_max,
+            charge[t] <= p_charge_max,
+            discharge[t] <= p_discharge_max,
+            grid_import[t] >= load[t] - pv[t] - discharge[t] + charge[t]
+        ]
+
+    objective = cp.Minimize(cp.sum(cp.multiply(grid_import, tariff)))
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=cp.SCS)
+
+    df['charge_kW'] = charge.value
+    df['discharge_kW'] = discharge.value
+    df['SoC_kWh'] = soc.value[1:]
+    df['grid_import_kW'] = grid_import.value
+    df['tariff'] = tariff
+
+    baseline_import = np.maximum(load - pv, 0)
+    baseline_cost = np.sum(baseline_import * tariff)
+    optimized_cost = np.sum(df['grid_import_kW'] * df['tariff'])
+    print(f"Baseline cost: ${baseline_cost:.2f}")
+    print(f"Optimized cost: ${optimized_cost:.2f}")
+    print(f"Cost savings: ${baseline_cost - optimized_cost:.2f}")
+
+    # --- Plots ---
+    plt.figure(figsize=(12,8))
+    plt.subplot(3,1,1)
+    plt.plot(df.index, df['load_kW'], label='Load')
+    plt.plot(df.index, df['p_ac_kw'], label='PV')
+    plt.plot(df.index, df['grid_import_kW'], label='Grid Import')
+    plt.legend(); plt.title('Power Profiles')
+
+    plt.subplot(3,1,2)
+    plt.plot(df.index, df['charge_kW'], label='Charge')
+    plt.plot(df.index, df['discharge_kW'], label='Discharge')
+    plt.legend(); plt.title('Battery Power')
+
+    plt.subplot(3,1,3)
+    plt.plot(df.index, df['SoC_kWh'], label='State of Charge')
+    plt.bar(df.index, df['tariff'], alpha=0.3, label='Tariff ($/kWh)')
+    plt.legend(); plt.title('SoC & Tariff')
+
     plt.tight_layout()
-    fname2 = "pv_cumulative_energy.png"
-    plt.savefig(fname2, dpi=200)
+    plt.savefig("pv_battery_optimization.png", dpi=150)
     plt.show()
-    print(f"Saved plot: {fname2}")
 
-    # Write a short summary file
-    summary = {
-        "start_date": start_date, "end_date": end_date,
-        "lat": lat, "lon": lon, "tz": tz,
-        "system_kw": system_kw, "tilt": tilt, "azimuth": azimuth,
-        "derate": derate, "total_kwh": total_energy_kwh
-    }
-    pd.Series(summary).to_csv("pv_summary.csv")
-    print("Saved summary: pv_summary.csv")
+    # Save combined results
+    df.to_csv("pv_battery_results.csv")
+    print("Saved combined PV + battery results: pv_battery_results.csv")
 
 if __name__ == "__main__":
     main()
