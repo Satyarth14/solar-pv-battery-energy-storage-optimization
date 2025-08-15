@@ -58,11 +58,11 @@ You will be prompted for:
 
 ## Project Structure
 ```
-solar_pv_simulation.py       # Main simulation + optimization script
-requirements.txt             # Dependencies
-README.md                    # Project documentation
-pv_battery_results.csv       # Sample output data
-pv_battery_optimization.png  # Sample plot
+solar_pv_simulation.py      
+requirements.txt            
+README.md                   
+pv_battery_results.csv      
+pv_battery_optimization.png 
 ```
 
 ---
